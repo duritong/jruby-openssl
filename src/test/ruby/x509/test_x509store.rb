@@ -323,4 +323,75 @@ class TestX509Store < TestCase
     assert_equal(false, store.verify(ee2_cert))
   end
 
+  def test_verify2
+    require 'securerandom'
+    charset = (0..9).to_a + ('a'..'f').to_a
+    #mainly from http://ruby-doc.org/stdlib-2.4.0/libdoc/openssl/rdoc/OpenSSL/X509/Certificate.html
+    root_key = OpenSSL::PKey::RSA.new 2048
+    root_ca = OpenSSL::X509::Certificate.new
+    root_ca.version = 2 # cf. RFC 5280 - to make it a "v3" certificate
+    root_ca.serial = (1..20).collect{|a| charset[SecureRandom.random_number(charset.size)] }.join.to_s.to_i(16)
+    root_ca.subject = OpenSSL::X509::Name.parse "/DC=org/DC=ruby-lang/CN=Ruby CA"
+    root_ca.issuer = root_ca.subject # root CA's are "self-signed"
+    root_ca.public_key = root_key.public_key
+    root_ca.not_before = Time.now
+    root_ca.not_after = root_ca.not_before + 2 * 365 * 24 * 60 * 60 # 2 years validity
+    ef = OpenSSL::X509::ExtensionFactory.new
+    ef.subject_certificate = root_ca
+    ef.issuer_certificate = root_ca
+    root_ca.extensions = [ ef.create_extension("subjectKeyIdentifier", "hash") ]
+    root_ca.add_extension(ef.create_extension("basicConstraints","CA:TRUE",true))
+    root_ca.add_extension(ef.create_extension("keyUsage",['keyCertSign', 'cRLSign', 'nonRepudiation','digitalSignature', 'keyEncipherment' ].join(','), true))
+    # adding issuer:always
+    root_ca.add_extension(ef.create_extension("authorityKeyIdentifier","keyid:always,issuer:always",false))
+    root_ca.sign(root_key, OpenSSL::Digest::SHA256.new)
+
+    ica_key = OpenSSL::PKey::RSA.new 2048
+    ica = OpenSSL::X509::Certificate.new
+    ica.version = 2
+    ica.serial = (1..20).collect{|a| charset[SecureRandom.random_number(charset.size)] }.join.to_s.to_i(16)
+    ica.subject = OpenSSL::X509::Name.parse "/DC=org/DC=ruby-lang/CN=Ruby intermediate CA"
+    ica.issuer = root_ca.subject # root CA is the issuer
+    ica.public_key = ica_key.public_key
+    ica.not_before = Time.now
+    ica.not_after = ica.not_before + 1 * 365 * 24 * 60 * 60 # 1 years validity
+    ef = OpenSSL::X509::ExtensionFactory.new
+    ef.subject_certificate = ica
+    ef.issuer_certificate = root_ca
+    ica.extensions = [ ef.create_extension("subjectKeyIdentifier", "hash") ]
+    ica.add_extension(ef.create_extension("basicConstraints","CA:TRUE",true))
+    ica.add_extension(ef.create_extension("keyUsage",["keyCertSign, cRLSign",'nonRepudiation','digitalSignature', 'keyEncipherment'].join(','), true))
+    root_ca.add_extension(ef.create_extension("authorityKeyIdentifier","keyid:always,issuer:always",false))
+    ica.sign(root_key, OpenSSL::Digest::SHA256.new)
+
+    store = OpenSSL::X509::Store.new
+    store.purpose = OpenSSL::X509::PURPOSE_SSL_CLIENT
+    store.add_cert(root_ca)
+    assert store.verify(ica)
+
+    key = OpenSSL::PKey::RSA.new 2048
+    cert = OpenSSL::X509::Certificate.new
+    cert.version = 2
+    cert.serial = (1..20).collect{|a| charset[SecureRandom.random_number(charset.size)] }.join.to_s.to_i(16)
+    cert.subject = OpenSSL::X509::Name.parse "/DC=org/DC=ruby-lang/CN=Ruby certificate"
+    cert.issuer = ica.subject # intermediate CA is the issuer
+    cert.public_key = key.public_key
+    cert.not_before = Time.now
+    cert.not_after = cert.not_before + 1 * 365 * 24 * 60 * 60 # 1 years validity
+    ef = OpenSSL::X509::ExtensionFactory.new
+    ef.subject_certificate = cert
+    ef.issuer_certificate = ica
+    cert.extensions = [ ef.create_extension("subjectKeyIdentifier", "hash") ]
+    cert.add_extension ef.create_extension("basicConstraints","CA:FALSE", true)
+    cert.add_extension(ef.create_extension("keyUsage",['nonRepudiation','digitalSignature', 'keyEncipherment'].join(','), true))
+    root_ca.add_extension(ef.create_extension("authorityKeyIdentifier","keyid:always,issuer:always",false))
+    cert.sign(ica_key, OpenSSL::Digest::SHA256.new)
+
+    store = OpenSSL::X509::Store.new
+    store.purpose = OpenSSL::X509::PURPOSE_SSL_CLIENT
+    store.add_cert(root_ca)
+    store.add_cert(ica)
+    assert store.verify(cert)
+  end
+
 end
